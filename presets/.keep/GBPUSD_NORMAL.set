@@ -1,0 +1,5 @@
+InpATRPeriod=12
+InpATRMultSL=1.4
+InpATRMultTP=2.6
+InpRSIMinTrend=55
+InpRiskBoostPercent=1.4
