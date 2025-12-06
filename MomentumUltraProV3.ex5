@@ -1,0 +1,1361 @@
+//+------------------------------------------------------------------+
+//|  MOMENTUM AUTORISK ULTRA PRO V3.2                               |
+//|  - Multi-market engine (indices, XAU, FX, OIL, ...)              |
+//|  - Auto-Risk op basis van equity DD + Ultra Boost               |
+//|  - EMA-trend, breakout, ATR-regime, RSI, body/wick filter        |
+//|  - Volatility-adaptive trailing (ATR + EMA)                      |
+//|  - PRO dashboard + debug panel                                   |
+//|  - Custom OnTester ranking + CSV export                          |
+//+------------------------------------------------------------------+
+#property strict
+#include <Trade/Trade.mqh>
+CTrade trade;
+
+//--- EA versie (pas dit aan bij ieder release)
+#define EA_VERSION 3.10
+
+//-------------------------------------------------------------------
+// INPUTS - CORE
+//-------------------------------------------------------------------
+input ulong  InpMagicNumber        = 480000;
+input bool   InpUseAutoMagic       = true;
+
+input double InpRiskPercent        = 1.0;
+input double InpMaxLongLots        = 5.0;
+input double InpMaxShortLots       = 5.0;
+
+input bool   InpOneTradePerBar     = true;
+input bool   InpAllowLongs         = true;
+input bool   InpAllowShorts        = true;
+
+// ATR / basic volatility
+input int    InpATRPeriod          = 12;
+input double InpATRMultSL          = 1.2;
+input double InpATRMultTP          = 3.0;
+input bool   InpUseLowVolFilter    = true;
+input double InpMinATRPercent      = 0.0002;
+
+// ATR regime filter
+input int    InpATRRegimePeriod    = 40;
+input double InpATRLowFactor       = 0.8;
+input double InpATRHighFactor      = 2.1;
+
+// RSI momentum filter
+input bool   InpUseRSIFilter       = true;
+input int    InpRSILength          = 14;
+input double InpRSIMinTrend        = 60.0;
+
+// Trend EMAs
+input bool   InpUseTrendFilter     = true;
+input int    InpTrendFastPeriod    = 55;
+input int    InpTrendSlowPeriod    = 130;
+
+// Entry EMAs
+input bool   InpUseEntryEMAFilter  = true;
+input int    InpEntryFastPeriod    = 21;
+input int    InpEntrySlowPeriod    = 55;
+
+// Breakout / candle filters
+input int    InpBreakoutLookback   = 18;
+input double InpMinBodyPct         = 30.0;
+
+// Session filter
+input bool   InpUseSessionFilter   = true;
+input int    InpSess1StartHour     = 8;
+input int    InpSess1EndHour       = 12;
+input int    InpSess2StartHour     = 14;
+input int    InpSess2EndHour       = 21;
+
+// Auto-Risk
+input bool   InpUseAutoRisk        = true;
+input double InpRiskBoostPercent   = 3.0;
+input double InpRiskNormalPercent  = 1.5;
+input double InpRiskMinPercent     = 0.5;
+input double InpDD_Level1          = 0.5;
+input double InpDD_Level2          = 1.5;
+input double InpDD_StopLevel       = 3.0;
+
+// Trailing
+input bool   InpUseTrailing        = true;
+input double InpTrail_BE_ATR       = 1.0;
+input double InpTrail_ATR_Start    = 1.5;
+input double InpTrail_ATR_Mult     = 2.0;
+
+input double InpTrail_BE_OffsetATR = 0.2;
+input double InpTrail_EMA_Start    = 2.5;
+input bool   InpTrailUseTrendEMA   = true;
+
+// TP automation (momenteel niet actief in logic, maar reserve)
+input bool   InpUseTPAutomation    = false;
+input double InpTP1_Ratio          = 1.0;
+input double InpTP2_Ratio          = 2.0;
+input double InpTP3_Ratio          = 3.0;
+input double InpTP_Partial         = 0.25;
+
+// UI / debug
+input bool   InpShowDashboard      = true;
+input bool   InpShowDebugPanel     = true;
+input bool   InpDebug              = false;
+
+//--- Auto-Update
+input bool   InpUseAutoUpdate = false;    // true = versie online checken
+input string InpUpdateURL     = "https://jouw-domein.com/UltraProV3/version.txt";
+
+//-------------------------------------------------------------------
+// ULTRA PRO V3.2 EXTENSIONS (6 upgrades)
+//-------------------------------------------------------------------
+
+// 1) Trend Acceleration
+input double InpMinTrendDelta      = 0.00015;
+input bool   InpUseRSIAcceleration = false;   // placeholder (niet agressief gebruikt)
+
+// 2) ATR-normalized breakout
+input double InpMinBreakoutATR     = 0.20;
+
+// 3) Deep pullback validator
+input bool   InpUseDeepPullback    = true;
+input double InpPullMinBodyPct     = 35.0;
+input double InpPullMaxWickPct     = 50.0;
+
+// 4) Regime V2 (ATR fast/slow)
+input int    InpATRFastPeriod      = 10;
+input int    InpATRSlowPeriod      = 50;
+
+// 5) Volatility-adaptive trailing
+input double InpRegimeMultLow      = 1.40;
+input double InpRegimeMultNormal   = 1.00;
+input double InpRegimeMultHigh     = 0.70;
+
+// 6) Dynamic Risk Ultra Boost
+input double InpRiskUltraBoost     = 1.40;
+input double InpDD_UltraLevel      = 0.40;
+
+//-------------------------------------------------------------------
+// GLOBALS
+//-------------------------------------------------------------------
+string   g_symbol  = "";
+string   g_baseSymbol = "";
+ulong    g_magic   = 0;
+
+double   g_point      = 0.0;
+double   g_tickValue  = 0.0;
+double   g_tickSize   = 0.0;
+double   g_minLot     = 0.0;
+double   g_maxLot     = 0.0;
+double   g_lotStep    = 0.0;
+
+double   g_peakEquity       = 0.0;
+double   g_currentDDPercent = 0.0;
+datetime g_lastBarTime      = 0;
+
+// indicator handles
+int hATR           = INVALID_HANDLE;
+int hRSI           = INVALID_HANDLE;
+int hTrendFastEMA  = INVALID_HANDLE;
+int hTrendSlowEMA  = INVALID_HANDLE;
+int hEntryFastEMA  = INVALID_HANDLE;
+int hEntrySlowEMA  = INVALID_HANDLE;
+
+// runtime config (gevuld uit inputs)
+int    cATRPeriod, cRSILength, cTrendFastPeriod, cTrendSlowPeriod;
+int    cEntryFastPeriod, cEntrySlowPeriod, cBreakoutLookback;
+double cATRMultSL, cATRMultTP, cMinATRPercent, cMinBodyPct;
+bool   cUseLowVolFilter, cUseRSIFilter, cUseTrendFilter, cUseEntryEMAFilter;
+int    cATRRegimePeriod;
+double cATRLowFactor, cATRHighFactor;
+double cRSIMinTrend;
+bool   cUseSessionFilter;
+int    cSess1StartHour, cSess1EndHour, cSess2StartHour, cSess2EndHour;
+bool   cUseAutoRisk;
+double cRiskBoostPercent, cRiskNormalPercent, cRiskMinPercent;
+double cDD_Level1, cDD_Level2, cDD_StopLevel;
+
+// Ultra Pro runtime config
+double cMinTrendDelta;
+bool   cUseRSIAcceleration;
+double cMinBreakoutATR;
+
+bool   cUseDeepPullback;
+double cPullMinBodyPct;
+double cPullMaxWickPct;
+
+int    cATRFastPeriod;
+int    cATRSlowPeriod;
+
+double cRegimeMultLow;
+double cRegimeMultNormal;
+double cRegimeMultHigh;
+
+double cRiskUltraBoost;
+double cDD_UltraLevel;
+
+// Optimizer globals
+int    g_optFileHandle = INVALID_HANDLE;
+double g_bestScore     = -DBL_MAX;
+
+//--- Auto-Update state
+double g_remoteVersion   = 0.0;
+bool   g_updateAvailable = false;
+string g_updateInfo      = "";
+
+//-------------------------------------------------------------------
+// Helper structs
+//-------------------------------------------------------------------
+struct UltraInd
+{
+   double atr;
+   double rsi;
+   double trendFast;
+   double trendSlow;
+   double entryFast;
+   double entrySlow;
+};
+
+//+------------------------------------------------------------------+
+//| Base symbol (strip suffix)                                       |
+//+------------------------------------------------------------------+
+string BaseSymbol(string sym)
+{
+   int n = StringLen(sym);
+   for(int i=0;i<n;i++)
+   {
+      int c = StringGetCharacter(sym,i);
+      bool ok = (c>='A'&&c<='Z')||(c>='a'&&c<='z')||(c>='0'&&c<='9');
+      if(!ok)
+         return StringSubstr(sym,0,i);
+   }
+   return sym;
+}
+
+//+------------------------------------------------------------------+
+//| Auto Magic Number                                                |
+//+------------------------------------------------------------------+
+ulong AutoMagic(const string base)
+{
+   int n = StringLen(base);
+   string num = "";
+   for(int i=n-1;i>=0;i--)
+   {
+      int c = StringGetCharacter(base,i);
+      if(c>='0' && c<='9')
+         num = (string)StringSubstr(base,i,1) + num;
+      else
+         break;
+   }
+   if(StringLen(num)>0)
+      return 480000 + (ulong)StringToInteger(num);
+
+   int h=0;
+   for(int i=0;i<n;i++)
+      h = (h*31 + StringGetCharacter(base,i)) & 0x7FFFFFFF;
+
+   return 480000 + (ulong)(h % 100000);
+}
+
+//+------------------------------------------------------------------+
+//| WebRequest helper - download text (bv. versie)                   |
+//+------------------------------------------------------------------+
+bool DownloadText(const string url, string &outText)
+{
+   outText = "";
+   char data[];      // geen POST data
+   char result[];    // hier komt HTTP-body in
+   string headers = "";
+
+   int res = WebRequest("GET",
+                        url,
+                        "",
+                        5000,
+                        data,
+                        result,
+                        headers);
+
+   if(res != 200)
+   {
+      Print("AutoUpdate: WebRequest failed. Code=", res, " URL=", url);
+      return false;
+   }
+
+   if(ArraySize(result) <= 0)
+   {
+      Print("AutoUpdate: leeg antwoord van server.");
+      return false;
+   }
+
+   outText = CharArrayToString(result, 0, -1, CP_UTF8);
+   StringTrimLeft(outText);
+   StringTrimRight(outText);
+   return (StringLen(outText) > 0);
+}
+
+//+------------------------------------------------------------------+
+//| CheckForUpdate - vergelijkt EA_VERSION met remote versie         |
+//+------------------------------------------------------------------+
+void CheckForUpdate()
+{
+   g_updateAvailable = false;
+   g_remoteVersion   = 0.0;
+   g_updateInfo      = "";
+
+   if(!InpUseAutoUpdate)
+      return;
+
+   if(StringLen(InpUpdateURL) < 10)
+   {
+      Print("AutoUpdate: InpUpdateURL niet ingesteld.");
+      return;
+   }
+
+   string txt;
+   if(!DownloadText(InpUpdateURL, txt))
+   {
+      g_updateInfo = "Update check failed";
+      return;
+   }
+
+   // Verwacht tekst als bv: 3.20 of "3.20\n"
+   double remote = StringToDouble(txt);
+   if(remote <= 0.0)
+   {
+      Print("AutoUpdate: kon remote versie niet parsen uit: ", txt);
+      g_updateInfo = "Update parse error";
+      return;
+   }
+
+   g_remoteVersion = remote;
+
+   if(remote > EA_VERSION)
+   {
+      g_updateAvailable = true;
+      g_updateInfo = "Nieuwe versie v" + DoubleToString(remote,2) +
+                     " beschikbaar (huidig v" + DoubleToString(EA_VERSION,2) + ")";
+      Print("AutoUpdate: ", g_updateInfo);
+   }
+   else
+   {
+      g_updateInfo = "Up-to-date (v" + DoubleToString(EA_VERSION,2) + ")";
+      Print("AutoUpdate: EA is up-to-date. Local=", DoubleToString(EA_VERSION,2),
+            " Remote=", DoubleToString(remote,2));
+   }
+}
+
+
+//+------------------------------------------------------------------+
+//| LoadConfig from inputs                                           |
+//+------------------------------------------------------------------+
+void LoadConfig()
+{
+   cATRPeriod        = InpATRPeriod;
+   cATRMultSL        = InpATRMultSL;
+   cATRMultTP        = InpATRMultTP;
+   cUseLowVolFilter  = InpUseLowVolFilter;
+   cMinATRPercent    = InpMinATRPercent;
+
+   cATRRegimePeriod  = InpATRRegimePeriod;
+   cATRLowFactor     = InpATRLowFactor;
+   cATRHighFactor    = InpATRHighFactor;
+
+   cUseRSIFilter     = InpUseRSIFilter;
+   cRSILength        = InpRSILength;
+   cRSIMinTrend      = InpRSIMinTrend;
+
+   cUseTrendFilter   = InpUseTrendFilter;
+   cTrendFastPeriod  = InpTrendFastPeriod;
+   cTrendSlowPeriod  = InpTrendSlowPeriod;
+
+   cUseEntryEMAFilter = InpUseEntryEMAFilter;
+   cEntryFastPeriod   = InpEntryFastPeriod;
+   cEntrySlowPeriod   = InpEntrySlowPeriod;
+
+   cBreakoutLookback = InpBreakoutLookback;
+   cMinBodyPct       = InpMinBodyPct;
+
+   cUseSessionFilter = InpUseSessionFilter;
+   cSess1StartHour   = InpSess1StartHour;
+   cSess1EndHour     = InpSess1EndHour;
+   cSess2StartHour   = InpSess2StartHour;
+   cSess2EndHour     = InpSess2EndHour;
+
+   cUseAutoRisk      = InpUseAutoRisk;
+   cRiskBoostPercent = InpRiskBoostPercent;
+   cRiskNormalPercent= InpRiskNormalPercent;
+   cRiskMinPercent   = InpRiskMinPercent;
+   cDD_Level1        = InpDD_Level1;
+   cDD_Level2        = InpDD_Level2;
+   cDD_StopLevel     = InpDD_StopLevel;
+
+   // Ultra Pro
+   cMinTrendDelta      = InpMinTrendDelta;
+   cUseRSIAcceleration = InpUseRSIAcceleration;
+   cMinBreakoutATR     = InpMinBreakoutATR;
+
+   cUseDeepPullback    = InpUseDeepPullback;
+   cPullMinBodyPct     = InpPullMinBodyPct;
+   cPullMaxWickPct     = InpPullMaxWickPct;
+
+   cATRFastPeriod      = InpATRFastPeriod;
+   cATRSlowPeriod      = InpATRSlowPeriod;
+
+   cRegimeMultLow      = InpRegimeMultLow;
+   cRegimeMultNormal   = InpRegimeMultNormal;
+   cRegimeMultHigh     = InpRegimeMultHigh;
+
+   cRiskUltraBoost     = InpRiskUltraBoost;
+   cDD_UltraLevel      = InpDD_UltraLevel;
+}
+
+//+------------------------------------------------------------------+
+//| IsSessionOK                                                      |
+//+------------------------------------------------------------------+
+bool IsSessionOK()
+{
+   if(!cUseSessionFilter)
+      return true;
+
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+
+   bool s1 = (dt.hour >= cSess1StartHour && dt.hour < cSess1EndHour);
+   bool s2 = (dt.hour >= cSess2StartHour && dt.hour < cSess2EndHour);
+
+   return (s1 || s2);
+}
+
+//+------------------------------------------------------------------+
+//| Drawdown tracker                                                 |
+//+------------------------------------------------------------------+
+void UpdateDrawdown()
+{
+   double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(eq > g_peakEquity)
+      g_peakEquity = eq;
+
+   if(g_peakEquity > 0.0)
+      g_currentDDPercent = 100.0 * (g_peakEquity - eq) / g_peakEquity;
+   else
+      g_currentDDPercent = 0.0;
+}
+
+//+------------------------------------------------------------------+
+//| Base Risk (zonder Ultra boost)                                  |
+//+------------------------------------------------------------------+
+double GetBaseRiskPercent()
+{
+   if(!cUseAutoRisk)
+      return InpRiskPercent;
+
+   if(g_currentDDPercent > cDD_StopLevel)
+      return 0.0;
+
+   if(g_currentDDPercent > cDD_Level2)
+      return cRiskMinPercent;
+
+   if(g_currentDDPercent > cDD_Level1)
+      return cRiskNormalPercent;
+
+   return cRiskBoostPercent;
+}
+
+//+------------------------------------------------------------------+
+//| ATRRatio (fast vs slow)                                         |
+//+------------------------------------------------------------------+
+double ATRRatio()
+{
+   if(hATR == INVALID_HANDLE)
+      return 1.0;
+
+   int fastP = MathMax(1,  MathMin(100, cATRFastPeriod));
+   int slowP = MathMax(fastP+1, MathMin(200, cATRSlowPeriod));
+
+   double bufFast[200];
+   double bufSlow[200];
+
+   int cFast = CopyBuffer(hATR, 0, 0, fastP, bufFast);
+   int cSlow = CopyBuffer(hATR, 0, 0, slowP, bufSlow);
+
+   if(cFast <= 0 || cSlow <= 0)
+      return 1.0;
+
+   double fastAvg=0.0, slowAvg=0.0;
+
+   for(int i=0;i<cFast;i++) fastAvg += bufFast[i];
+   fastAvg /= cFast;
+
+   for(int j=0;j<cSlow;j++) slowAvg += bufSlow[j];
+   slowAvg /= cSlow;
+
+   if(slowAvg <= 0.0)
+      return 1.0;
+
+   return fastAvg / slowAvg;
+}
+
+//+------------------------------------------------------------------+
+//| Regime detectie: -1=LOW, 0=NORMAL, +1=HIGH                      |
+//+------------------------------------------------------------------+
+int GetRegime()
+{
+   double ratio = ATRRatio();
+
+   if(ratio < cRegimeMultLow)
+      return -1;
+   if(ratio > cRegimeMultHigh)
+      return +1;
+   return 0;
+}
+
+//+------------------------------------------------------------------+
+//| RSI acceleration helper                                          |
+//+------------------------------------------------------------------+
+bool RSIFastAccel(double rsiPrev, double rsiNow, double minDelta)
+{
+   double d = rsiNow - rsiPrev;
+   return (MathAbs(d) >= minDelta);
+}
+
+//+------------------------------------------------------------------+
+//| Deep pullback validator                                          |
+//+------------------------------------------------------------------+
+bool IsDeepPullback(double open, double close, double high, double low)
+{
+   if(!cUseDeepPullback)
+      return true;
+
+   double range = high - low;
+   if(range <= 0.0)
+      return false;
+
+   double body  = MathAbs(close - open);
+   double bodyPct = (body / range) * 100.0;
+
+   double wickTop    = high - MathMax(open,close);
+   double wickBottom = MathMin(open,close) - low;
+
+   double wickTopPct    = (wickTop / range) * 100.0;
+   double wickBottomPct = (wickBottom / range) * 100.0;
+
+   if(bodyPct < cPullMinBodyPct)
+      return false;
+
+   if(wickTopPct > cPullMaxWickPct && wickBottomPct > cPullMaxWickPct)
+      return false;
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Breakout afstand in ATR (confirmatie)                            |
+//+------------------------------------------------------------------+
+bool ConfirmBreakoutATR(double closePrice, double level)
+{
+   if(cMinBreakoutATR <= 0.0)
+      return true;
+
+   double atrPrev[1];
+   if(CopyBuffer(hATR,0,1,1,atrPrev) != 1)
+      return false;
+
+   if(atrPrev[0] <= 0.0)
+      return false;
+
+   return (MathAbs(closePrice - level) >= (atrPrev[0] * cMinBreakoutATR));
+}
+
+//+------------------------------------------------------------------+
+//| ComputeUltraRisk: boost / dempen naar regime en DD              |
+//+------------------------------------------------------------------+
+double ComputeUltraRisk(double baseRisk)
+{
+   if(baseRisk <= 0.0)
+      return 0.0;
+
+   int regime = GetRegime();
+
+   double adjusted = baseRisk;
+
+   // HIGH vol regime → extra boost
+   if(regime > 0)
+      adjusted += cRiskUltraBoost;
+
+   // DD te groot t.o.v. Ultra-level → halve risk
+   if(g_currentDDPercent > cDD_UltraLevel)
+      adjusted *= 0.5;
+
+   return adjusted;
+}
+
+//+------------------------------------------------------------------+
+//| Final risk percent                                               |
+//+------------------------------------------------------------------+
+double GetRiskPercent()
+{
+   double base = GetBaseRiskPercent();
+   if(base <= 0.0)
+      return 0.0;
+
+   return ComputeUltraRisk(base);
+}
+
+//+------------------------------------------------------------------+
+//| IsNewBar                                                         |
+//+------------------------------------------------------------------+
+bool IsNewBar()
+{
+   datetime t[1];
+   if(CopyTime(g_symbol,_Period,0,1,t) != 1)
+      return false;
+
+   if(t[0] != g_lastBarTime)
+   {
+      g_lastBarTime = t[0];
+      return true;
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Indicator loader in struct                                       |
+//+------------------------------------------------------------------+
+bool LoadInd(int shift, UltraInd &I)
+{
+   double b[1];
+
+   if(CopyBuffer(hATR,0,shift,1,b)!=1) return false;
+   I.atr = b[0];
+
+   if(CopyBuffer(hRSI,0,shift,1,b)!=1) return false;
+   I.rsi = b[0];
+
+   if(CopyBuffer(hTrendFastEMA,0,shift,1,b)!=1) return false;
+   I.trendFast = b[0];
+
+   if(CopyBuffer(hTrendSlowEMA,0,shift,1,b)!=1) return false;
+   I.trendSlow = b[0];
+
+   if(CopyBuffer(hEntryFastEMA,0,shift,1,b)!=1) return false;
+   I.entryFast = b[0];
+
+   if(CopyBuffer(hEntrySlowEMA,0,shift,1,b)!=1) return false;
+   I.entrySlow = b[0];
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Breakout levels                                                  |
+//+------------------------------------------------------------------+
+bool GetBreakoutLevels(int lookback, double &hi, double &lo)
+{
+   if(lookback < 2)  lookback = 2;
+   if(lookback > 50) lookback = 50;
+
+   double H[64], L[64];
+
+   int cH = CopyHigh(g_symbol,_Period,2,lookback,H);
+   int cL = CopyLow (g_symbol,_Period,2,lookback,L);
+
+   if(cH < lookback || cL < lookback)
+      return false;
+
+   hi = H[0];
+   lo = L[0];
+
+   for(int k=1;k<lookback;k++)
+   {
+      if(H[k] > hi) hi = H[k];
+      if(L[k] < lo) lo = L[k];
+   }
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Heeft EA al een positie open?                                   |
+//+------------------------------------------------------------------+
+bool HasOpenPosition()
+{
+   if(!PositionSelect(g_symbol))
+      return false;
+
+   return ((ulong)PositionGetInteger(POSITION_MAGIC) == g_magic);
+}
+
+//+------------------------------------------------------------------+
+//| LotCalculator                                                    |
+//+------------------------------------------------------------------+
+double CalcLot(double entry, double sl, bool isLong)
+{
+   double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(eq <= 0.0) return 0.0;
+
+   double riskPct = GetRiskPercent();
+   if(riskPct <= 0.0) return 0.0;
+
+   double riskMoney = eq * (riskPct / 100.0);
+
+   double distPts = (isLong ? (entry - sl) : (sl - entry)) / g_point;
+   if(distPts <= 0.0) return 0.0;
+
+   if(g_tickSize <= 0.0) return 0.0;
+
+   double perPoint   = g_tickValue / g_tickSize;
+   double riskPerLot = distPts * perPoint;
+   if(riskPerLot <= 0.0) return 0.0;
+
+   double lots = riskMoney / riskPerLot;
+
+   if(isLong && lots > InpMaxLongLots)   lots = InpMaxLongLots;
+   if(!isLong && lots > InpMaxShortLots) lots = InpMaxShortLots;
+
+   if(lots > g_maxLot) lots = g_maxLot;
+   if(lots < g_minLot) lots = g_minLot;
+
+   return NormalizeDouble(lots, 2);
+}
+
+//+------------------------------------------------------------------+
+//| TRAILING ENGINE V3 – zonder loop, 1 positie per EA/symbool       |
+//+------------------------------------------------------------------+
+void TrailPositions()
+{
+   if(!InpUseTrailing)
+      return;
+
+   if(!PositionSelect(g_symbol))
+      return;
+
+   if((ulong)PositionGetInteger(POSITION_MAGIC) != g_magic)
+      return;
+
+   ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+   double open = PositionGetDouble(POSITION_PRICE_OPEN);
+   double sl   = PositionGetDouble(POSITION_SL);
+   double tp   = PositionGetDouble(POSITION_TP);
+
+   double bid  = SymbolInfoDouble(g_symbol, SYMBOL_BID);
+   double ask  = SymbolInfoDouble(g_symbol, SYMBOL_ASK);
+   if(bid <= 0.0 || ask <= 0.0)
+      return;
+
+   double price = (type == POSITION_TYPE_BUY ? bid : ask);
+
+   // eerst check of er winst is
+   double profit = (type==POSITION_TYPE_BUY ? price-open : open-price);
+   if(profit <= 0.0)
+      return;
+
+   UltraInd I;
+   if(!LoadInd(0, I))
+      return;
+
+   if(I.atr <= 0.0)
+      return;
+
+   double newSL = sl;
+
+   // regime-adaptieve factor voor trailing
+   int regime = GetRegime();
+   double regimeMult = cRegimeMultNormal;
+   if(regime < 0) regimeMult = cRegimeMultLow;
+   if(regime > 0) regimeMult = cRegimeMultHigh;
+
+   // triggers
+   double beTrigger  = I.atr * InpTrail_BE_ATR;
+   double atrTrigger = I.atr * InpTrail_ATR_Start;
+   double emaTrigger = I.atr * InpTrail_EMA_Start;
+
+   // 1) Break-even
+   if(profit >= beTrigger)
+   {
+      double beLevel = (type==POSITION_TYPE_BUY ?
+                        open + I.atr*InpTrail_BE_OffsetATR :
+                        open - I.atr*InpTrail_BE_OffsetATR);
+
+      if(type==POSITION_TYPE_BUY)
+         newSL = (sl <= 0.0 ? beLevel : MathMax(newSL, beLevel));
+      else
+         newSL = (sl <= 0.0 ? beLevel : MathMin(newSL, beLevel));
+   }
+
+   // 2) ATR trailing (met regime factor)
+   if(profit >= atrTrigger)
+   {
+      double dist  = I.atr * InpTrail_ATR_Mult * regimeMult;
+      double atrSL = (type==POSITION_TYPE_BUY ? price - dist : price + dist);
+
+      if(type==POSITION_TYPE_BUY)
+         newSL = (sl <= 0.0 ? atrSL : MathMax(newSL, atrSL));
+      else
+         newSL = (sl <= 0.0 ? atrSL : MathMin(newSL, atrSL));
+   }
+
+   // 3) EMA trailing
+   if(profit >= emaTrigger)
+   {
+      double emaRef = (InpTrailUseTrendEMA ? I.trendFast : I.entryFast);
+      double emaSL  = (type==POSITION_TYPE_BUY ?
+                       emaRef - I.atr*0.3 :
+                       emaRef + I.atr*0.3);
+
+      if(type==POSITION_TYPE_BUY)
+         newSL = (sl <= 0.0 ? emaSL : MathMax(newSL, emaSL));
+      else
+         newSL = (sl <= 0.0 ? emaSL : MathMin(newSL, emaSL));
+   }
+
+   // geen verslechtering
+   if(sl > 0.0)
+   {
+      if(type==POSITION_TYPE_BUY  && newSL <= sl) return;
+      if(type==POSITION_TYPE_SELL && newSL >= sl) return;
+   }
+
+   trade.SetExpertMagicNumber(g_magic);
+   trade.PositionModify(g_symbol, newSL, tp);
+}
+
+//+------------------------------------------------------------------+
+//| ENTRY ENGINE – CheckSignals                                      |
+//+------------------------------------------------------------------+
+void CheckSignals()
+{
+   if(!IsSessionOK())
+      return;
+
+   if(HasOpenPosition())
+      return;
+
+   double bid = SymbolInfoDouble(g_symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(g_symbol, SYMBOL_ASK);
+   if(bid <= 0.0 || ask <= 0.0)
+      return;
+
+   UltraInd I;
+   if(!LoadInd(1, I))
+      return;
+
+   double prevC = iClose(g_symbol,_Period,1);
+   double prevO = iOpen (g_symbol,_Period,1);
+   double prevH = iHigh (g_symbol,_Period,1);
+   double prevL = iLow  (g_symbol,_Period,1);
+
+   if(prevC <= 0.0 || I.atr <= 0.0)
+      return;
+
+   // ATR% filter (low-vol blokkeren)
+   double atrPct = I.atr / prevC;
+   if(cUseLowVolFilter && atrPct < cMinATRPercent)
+      return;
+
+   // ATR regime (mean / ratio)
+   bool regimeOK = true;
+   if(cATRRegimePeriod > 1)
+   {
+      int cnt = MathMin(cATRRegimePeriod, 100);
+      double buf[100];
+      int copied = CopyBuffer(hATR,0,1,cnt,buf);
+      if(copied > 0)
+      {
+         double ma=0.0;
+         for(int i=0;i<copied;i++) ma += buf[i];
+         ma /= copied;
+
+         if(ma > 0.0)
+         {
+            if(I.atr < ma * cATRLowFactor || I.atr > ma * cATRHighFactor)
+               regimeOK = false;
+         }
+      }
+   }
+   if(!regimeOK)
+      return;
+
+   // Candle body
+   double range   = prevH - prevL;
+   double bodyPct = (range>0.0 ? MathAbs(prevC-prevO)/range*100.0 : 0.0);
+   if(bodyPct < cMinBodyPct)
+      return;
+
+   // Deep pullback (optioneel)
+   if(!IsDeepPullback(prevO,prevC,prevH,prevL))
+      return;
+
+   // Trend logic
+   bool bullTrend = true;
+   bool bearTrend = true;
+
+   if(cUseTrendFilter)
+   {
+      double delta = I.trendFast - I.trendSlow;
+      bullTrend = (delta > 0.0 && MathAbs(delta) >= cMinTrendDelta);
+      bearTrend = (delta < 0.0 && MathAbs(delta) >= cMinTrendDelta);
+   }
+
+   // Entry EMAs
+   bool priceAboveEntry = true;
+   bool priceBelowEntry = true;
+
+   if(cUseEntryEMAFilter)
+   {
+      priceAboveEntry = (prevC > I.entryFast && I.entryFast > I.entrySlow);
+      priceBelowEntry = (prevC < I.entryFast && I.entryFast < I.entrySlow);
+   }
+
+   // RSI filters
+   bool rsiLongOK  = true;
+   bool rsiShortOK = true;
+
+   if(cUseRSIFilter)
+   {
+      rsiLongOK  = (I.rsi >= cRSIMinTrend);
+      rsiShortOK = (I.rsi <= (100.0 - cRSIMinTrend));
+   }
+
+   // RSI acceleration (optioneel, milde filter)
+   if(cUseRSIAcceleration)
+   {
+      double rPrevArr[1];
+      if(CopyBuffer(hRSI,0,2,1,rPrevArr)==1)
+      {
+         // enkel eisen dat er "beweging" is
+         if(!RSIFastAccel(rPrevArr[0], I.rsi, 0.5))  // 0.5 punt RSI
+            return;
+      }
+   }
+
+   // Breakout
+   double recHigh, recLow;
+   if(!GetBreakoutLevels(cBreakoutLookback, recHigh, recLow))
+      return;
+
+   bool breakoutLong  = (prevC > recHigh) && ConfirmBreakoutATR(prevC, recHigh);
+   bool breakoutShort = (prevC < recLow)  && ConfirmBreakoutATR(prevC, recLow);
+
+   bool longOK =
+      InpAllowLongs &&
+      bullTrend &&
+      breakoutLong &&
+      priceAboveEntry &&
+      rsiLongOK;
+
+   bool shortOK =
+      InpAllowShorts &&
+      bearTrend &&
+      breakoutShort &&
+      priceBelowEntry &&
+      rsiShortOK;
+
+   if(!longOK && !shortOK)
+      return;
+
+   // SL/TP calculatie
+   if(longOK)
+   {
+      double sl   = prevC - I.atr * cATRMultSL;
+      double tp   = prevC + I.atr * cATRMultTP;
+      double lots = CalcLot(prevC, sl, true);
+      if(lots > 0.0)
+      {
+         trade.SetExpertMagicNumber(g_magic);
+         if(!trade.Buy(lots, g_symbol, 0.0, sl, tp, g_baseSymbol+" LONG"))
+            Print("Buy failed, err=",GetLastError());
+      }
+   }
+   else if(shortOK)
+   {
+      double sl   = prevC + I.atr * cATRMultSL;
+      double tp   = prevC - I.atr * cATRMultTP;
+      double lots = CalcLot(prevC, sl, false);
+      if(lots > 0.0)
+      {
+         trade.SetExpertMagicNumber(g_magic);
+         if(!trade.Sell(lots, g_symbol, 0.0, sl, tp, g_baseSymbol+" SHORT"))
+            Print("Sell failed, err=",GetLastError());
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| MAIN DASHBOARD                                                   |
+//+------------------------------------------------------------------+
+void DrawMainDashboard()
+{
+   string tag = "DB_MAIN_INFO";
+   int x = 10;
+   int y = 10;
+
+   if(!ObjectFind(0, tag))
+      ObjectCreate(0, tag, OBJ_LABEL, 0, 0, 0);
+
+   ObjectSetInteger(0, tag, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, tag, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, tag, OBJPROP_CORNER,   CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, tag, OBJPROP_COLOR,    clrWhite);
+   ObjectSetInteger(0, tag, OBJPROP_FONTSIZE, 10);
+   ObjectSetString (0, tag, OBJPROP_FONT,     "Arial");
+
+   string riskMode = (cUseAutoRisk ? "AUTO" : "FIXED");
+
+   UltraInd I;
+   double atrNow = 0.0;
+   string trend  = "NEUTRAL";
+
+   if(LoadInd(1, I))
+   {
+      atrNow = I.atr;
+      if(cUseTrendFilter)
+      {
+         if(I.trendFast > I.trendSlow) trend = "BULL";
+         else if(I.trendFast < I.trendSlow) trend = "BEAR";
+      }
+   }
+
+   // ATR regime label
+   string atrReg = "N/A";
+   if(atrNow > 0.0 && cATRRegimePeriod > 1)
+   {
+      int cnt = MathMin(cATRRegimePeriod, 50);
+      double buf[50];
+      int copied = CopyBuffer(hATR,0,1,cnt,buf);
+      if(copied > 0)
+      {
+         double ma=0.0;
+         for(int k=0;k<copied;k++) ma += buf[k];
+         ma /= copied;
+         if(ma > 0.0)
+         {
+            double ratio = atrNow / ma;
+            if(ratio < cATRLowFactor)       atrReg = "LOW";
+            else if(ratio > cATRHighFactor) atrReg = "HIGH";
+            else                            atrReg = "NORMAL";
+         }
+      }
+   }
+
+   string sess = "OFF";
+   if(cUseSessionFilter)
+      sess = (IsSessionOK() ? "ACTIVE" : "CLOSED");
+
+    string updateLine = "";
+   if(InpUseAutoUpdate)
+   {
+      if(g_updateAvailable)
+         updateLine = "Update: NEW v" + DoubleToString(g_remoteVersion,2);
+      else if(g_remoteVersion > 0.0)
+         updateLine = "Update: OK (v" + DoubleToString(EA_VERSION,2) + ")";
+      else
+         updateLine = "Update: N/A";
+   }
+
+   string msg =
+      "MOMENTUM AUTORISK ULTRA PRO V3.2\n" +
+      "Symbol: " + g_symbol + " (base: " + g_baseSymbol + ")\n" +
+      "Trend: " + trend + "\n" +
+      "ATR Regime: " + atrReg + "\n" +
+      "Risk Mode: " + riskMode + "\n" +
+      "DD%: " + DoubleToString(g_currentDDPercent,2) + "%\n" +
+      "Risk% Current: " + DoubleToString(GetRiskPercent(),2) + "%\n" +
+      "Session: " + sess + "\n" +
+      "Magic: " + IntegerToString((int)g_magic) + "\n";
+
+   ObjectSetString(0, tag, OBJPROP_TEXT, msg);
+}
+
+//+------------------------------------------------------------------+
+//| DEBUG PANEL                                                      |
+//+------------------------------------------------------------------+
+void DrawDebugPanel()
+{
+   string tag = "DB_DEBUG";
+   int x = 10;
+   int y = 20;
+
+   if(!ObjectFind(0, tag))
+      ObjectCreate(0, tag, OBJ_LABEL, 0, 0, 0);
+
+   ObjectSetInteger(0, tag, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, tag, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, tag, OBJPROP_CORNER,   CORNER_LEFT_LOWER);
+   ObjectSetInteger(0, tag, OBJPROP_COLOR,    clrSilver);
+   ObjectSetInteger(0, tag, OBJPROP_FONTSIZE, 9);
+   ObjectSetString (0, tag, OBJPROP_FONT,     "Consolas");
+
+   UltraInd I;
+   LoadInd(1, I);
+
+   double prevC = iClose(g_symbol,_Period,1);
+   double prevO = iOpen (g_symbol,_Period,1);
+   double prevH = iHigh (g_symbol,_Period,1);
+   double prevL = iLow  (g_symbol,_Period,1);
+
+   double range   = prevH - prevL;
+   double bodyPct = (range>0.0 ? MathAbs(prevC-prevO)/range*100.0 : 0.0);
+
+   double recH=0.0, recL=0.0;
+   bool   hasBO = GetBreakoutLevels(cBreakoutLookback, recH, recL);
+
+   string boState="NONE";
+   if(hasBO && prevC > 0.0)
+   {
+      if(prevC > recH)      boState = "ABOVE";
+      else if(prevC < recL) boState = "BELOW";
+      else                  boState = "INSIDE";
+   }
+
+   string debug =
+      "ATR=" + DoubleToString(I.atr, _Digits) +
+      " | ATR%=" + (prevC>0.0 ? DoubleToString(I.atr/prevC*100.0,2) : "0") +
+      " | RSI=" + DoubleToString(I.rsi,1) +
+      " | TF="  + DoubleToString(I.trendFast,_Digits) +
+      " | TS="  + DoubleToString(I.trendSlow,_Digits) +
+      " | EF="  + DoubleToString(I.entryFast,_Digits) +
+      " | ES="  + DoubleToString(I.entrySlow,_Digits) + "\n" +
+      "Body%="  + DoubleToString(bodyPct,1) +
+      " | BO[" + IntegerToString(cBreakoutLookback) + "] H=" +
+      DoubleToString(recH,_Digits) + " L=" + DoubleToString(recL,_Digits) +
+      " | State=" + boState;
+
+   ObjectSetString(0, tag, OBJPROP_TEXT, debug);
+}
+
+//+------------------------------------------------------------------+
+//| DrawDashboard                                                    |
+//+------------------------------------------------------------------+
+void DrawDashboard()
+{
+   if(InpShowDashboard)
+      DrawMainDashboard();
+   if(InpShowDebugPanel)
+      DrawDebugPanel();
+}
+
+//+------------------------------------------------------------------+
+//| OnInit                                                           |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   g_symbol     = _Symbol;
+   g_baseSymbol = BaseSymbol(_Symbol);
+
+   g_point     = SymbolInfoDouble(g_symbol, SYMBOL_POINT);
+   g_tickValue = SymbolInfoDouble(g_symbol, SYMBOL_TRADE_TICK_VALUE);
+   g_tickSize  = SymbolInfoDouble(g_symbol, SYMBOL_TRADE_TICK_SIZE);
+   g_minLot    = SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_MIN);
+   g_maxLot    = SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_MAX);
+   g_lotStep   = SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_STEP);
+
+   if(g_point<=0.0 || g_tickSize<=0.0 || g_lotStep<=0.0)
+   {
+      Print("INIT FAILED: invalid symbol properties on ", g_symbol);
+      return(INIT_FAILED);
+   }
+
+   if(InpUseAutoMagic)
+      g_magic = AutoMagic(g_baseSymbol);
+   else
+      g_magic = InpMagicNumber;
+
+   if(InpDebug)
+      Print("ULTRA PRO init on ", g_symbol,
+            " (base=", g_baseSymbol, ", magic=", g_magic, ")");
+
+   LoadConfig();
+
+   hATR = iATR(g_symbol, _Period, cATRPeriod);
+   if(hATR == INVALID_HANDLE)
+   {
+      Print("INIT FAILED: ATR handle error");
+      return(INIT_FAILED);
+   }
+
+   hRSI = iRSI(g_symbol, _Period, cRSILength, PRICE_CLOSE);
+   if(hRSI == INVALID_HANDLE)
+   {
+      Print("INIT FAILED: RSI handle error");
+      return(INIT_FAILED);
+   }
+
+   hTrendFastEMA = iMA(g_symbol, _Period, cTrendFastPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   hTrendSlowEMA = iMA(g_symbol, _Period, cTrendSlowPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   if(hTrendFastEMA==INVALID_HANDLE || hTrendSlowEMA==INVALID_HANDLE)
+   {
+      Print("INIT FAILED: trend EMA handle error");
+      return(INIT_FAILED);
+   }
+
+   hEntryFastEMA = iMA(g_symbol, _Period, cEntryFastPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   hEntrySlowEMA = iMA(g_symbol, _Period, cEntrySlowPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   if(hEntryFastEMA==INVALID_HANDLE || hEntrySlowEMA==INVALID_HANDLE)
+   {
+      Print("INIT FAILED: entry EMA handle error");
+      return(INIT_FAILED);
+   }
+
+   g_peakEquity  = AccountInfoDouble(ACCOUNT_EQUITY);
+   g_lastBarTime = 0;
+
+   CheckForUpdate();
+
+   Print("MOMENTUM AUTORISK ULTRA PRO V3.2 INIT OK on ",
+         g_symbol," (base=",g_baseSymbol,", magic=",g_magic,")");
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| OnDeinit                                                         |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   ObjectDelete(0, "DB_MAIN_INFO");
+   ObjectDelete(0, "DB_DEBUG");
+
+   // sluit eventueel CSV file in tester
+   if(g_optFileHandle != INVALID_HANDLE)
+   {
+      FileClose(g_optFileHandle);
+      g_optFileHandle = INVALID_HANDLE;
+   }
+
+   Print("ULTRA PRO V3.2 deinit. Reason=", reason);
+}
+
+//+------------------------------------------------------------------+
+//| OnTick – bar-based entries, tick-based trailing                  |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   UpdateDrawdown();
+
+   bool newBar = IsNewBar();
+
+   if(newBar || !InpOneTradePerBar)
+   {
+      if(!(cUseAutoRisk && g_currentDDPercent > cDD_StopLevel))
+         CheckSignals();
+   }
+
+   TrailPositions();
+   DrawDashboard();
+}
+
+//===================================================================
+//  OPTIMIZER BLOCK – custom UltraScore ranking + CSV output
+//===================================================================
+
+//+------------------------------------------------------------------+
+//| UltraScore helper                                                |
+//+------------------------------------------------------------------+
+double ComputeUltraScore(double netProfit,
+                         double pf,
+                         double winRate,
+                         double maxDD)
+{
+   if(maxDD <= 0.0 || pf <= 0.0)
+      return -1e8;
+
+   if(winRate < 0.01) winRate = 0.01;
+   if(winRate > 0.99) winRate = 0.99;
+
+   double score = (netProfit * pf * winRate) / (maxDD * maxDD);
+   return score;
+}
+
+//+------------------------------------------------------------------+
+//| OnTesterInit – open CSV en reset best score                      |
+//+------------------------------------------------------------------+
+int OnTesterInit()
+{
+   g_bestScore = -DBL_MAX;
+
+   g_optFileHandle = FileOpen("UltraProV3_Optimizer.csv",
+                              FILE_WRITE | FILE_CSV | FILE_ANSI,
+                              ';');
+   if(g_optFileHandle != INVALID_HANDLE)
+   {
+      FileWrite(g_optFileHandle,
+                "Score",
+                "NetProfit",
+                "ProfitFactor",
+                "MaxDD_Rel%",
+                "Trades",
+                "WinRate",
+                "InpATRPeriod",
+                "InpATRMultSL",
+                "InpATRMultTP",
+                "InpRSIMinTrend",
+                "InpBreakoutLookback",
+                "InpMinBodyPct",
+                "InpRiskBoostPercent",
+                "InpRiskNormalPercent",
+                "InpRiskMinPercent");
+   }
+   else
+   {
+      Print("OnTesterInit: kon UltraProV3_Optimizer.csv niet openen");
+   }
+
+   return(0);
+}
+
+//+------------------------------------------------------------------+
+//| OnTester – ranking functie                                       |
+//+------------------------------------------------------------------+
+double OnTester()
+{
+   double netProfit = TesterStatistics(STAT_PROFIT);
+   double maxDDRel  =  TesterStatistics(STAT_EQUITY_DDREL_PERCENT);      // in %
+   double pf        = TesterStatistics(STAT_PROFIT_FACTOR);
+   double trades    = TesterStatistics(STAT_TRADES);
+   double wins      = TesterStatistics(STAT_PROFIT_TRADES);
+   double sharpe    = TesterStatistics(STAT_SHARPE_RATIO);
+
+   if(trades < 30 || maxDDRel <= 0.0 || pf <= 0.0)
+      return -1e8;
+
+   double winRate = (trades > 0.0 ? wins / trades : 0.0);
+
+   double ultra = ComputeUltraScore(netProfit, pf, winRate, maxDDRel);
+
+   if(sharpe > 0.0 && sharpe < 10.0)
+      ultra *= (1.0 + sharpe * 0.1);
+
+   if(ultra > g_bestScore)
+      g_bestScore = ultra;
+
+   if(g_optFileHandle != INVALID_HANDLE)
+   {
+      FileWrite(g_optFileHandle,
+                ultra,
+                netProfit,
+                pf,
+                maxDDRel,
+                trades,
+                winRate,
+                InpATRPeriod,
+                InpATRMultSL,
+                InpATRMultTP,
+                InpRSIMinTrend,
+                InpBreakoutLookback,
+                InpMinBodyPct,
+                InpRiskBoostPercent,
+                InpRiskNormalPercent,
+                InpRiskMinPercent);
+   }
+
+   return ultra;
+}
+
+//+------------------------------------------------------------------+
+//| OnTesterDeinit – sluit CSV                                       |
+//+------------------------------------------------------------------+
+void OnTesterDeinit()
+{
+   if(g_optFileHandle != INVALID_HANDLE)
+   {
+      FileClose(g_optFileHandle);
+      g_optFileHandle = INVALID_HANDLE;
+   }
+
+   Print("OnTesterDeinit: Best UltraScore = ", g_bestScore);
+}
+//+------------------------------------------------------------------+
