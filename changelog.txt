@@ -1,0 +1,19 @@
+Momentum Ultra Pro V3 – Changelog
+
+v3.2.1 (Latest)
+- Added ATR Regime V3 engine
+- Added RSI acceleration enhancement
+- Added trailing engine V3 (no-loop)
+- Added UltraScore optimizer ranking
+- Added auto-update support via GitHub
+- Improved dashboard readability
+- Improved session control and DD logic
+
+v3.1.0
+- Added Deep Pullback filter
+- Added ATR-normalized breakout confirmation
+- Added EMA acceleration entry filtering
+- Improved AutoRisk scaling
+
+v3.0.0
+- Initial release of Ultra Pro series
