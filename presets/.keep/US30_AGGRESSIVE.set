@@ -1,0 +1,5 @@
+InpATRPeriod=10
+InpATRMultSL=1.2
+InpATRMultTP=2.5
+InpRiskBoostPercent=3.5
+InpDD_StopLevel=8.0
