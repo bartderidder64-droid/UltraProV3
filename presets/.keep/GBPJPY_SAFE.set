@@ -1,0 +1,4 @@
+InpATRPeriod=16
+InpATRMultSL=2.2
+InpATRMultTP=3.4
+InpRSIMinTrend=60
