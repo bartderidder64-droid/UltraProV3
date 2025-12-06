@@ -1,0 +1,14 @@
+InpATRPeriod=10
+InpATRMultSL=1.2
+InpATRMultTP=2.5
+InpMinATRPercent=0.00015
+
+InpUseRSIFilter=true
+InpRSIMinTrend=50
+
+InpRiskBoostPercent=3.0
+InpRiskNormalPercent=1.5
+InpRiskMinPercent=0.5
+InpDD_Level1=1.5
+InpDD_Level2=3.0
+InpDD_StopLevel=6.0
