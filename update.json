@@ -1,0 +1,12 @@
+{
+    "version": "3.2.1",
+    "download": "https://raw.githubusercontent.com/bartderidder64-droid/UltraProV3/main/MomentumUltraProV3.ex5",
+    "release_notes": [
+        "Momentum Ultra Pro V3.2.1",
+        "✔ RSI Acceleration verbeterd",
+        "✔ ATR Regime V3 toegevoegd",
+        "✔ Nieuwe Trailing Engine zonder loop",
+        "✔ Performance dashboard verbeterd",
+        "✔ Optimizer Ranking toegevoegd"
+    ]
+}
