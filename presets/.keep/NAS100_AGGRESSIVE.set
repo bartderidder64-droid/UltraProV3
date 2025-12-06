@@ -1,0 +1,12 @@
+InpATRPeriod=10
+InpATRMultSL=1.2
+InpATRMultTP=2.5
+
+InpRSIMinTrend=48
+InpTrendFastPeriod=25
+InpTrendSlowPeriod=70
+
+InpRiskBoostPercent=3.5
+InpRiskNormalPercent=2.0
+InpRiskMinPercent=0.5
+InpDD_StopLevel=7.0
